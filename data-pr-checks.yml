@@ -1,0 +1,181 @@
+name: data-pr-checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  lint-python-or-sql:
+    name: lint-python-or-sql
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff black sqlfluff
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Black
+        run: black --check .
+
+      - name: SQLFluff
+        run: sqlfluff lint .
+        continue-on-error: true
+
+  test-pipeline:
+    name: test-pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -q
+
+  validate-models:
+    name: validate-models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dbt
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core dbt-duckdb
+
+      - name: dbt parse
+        run: |
+          if [ -f dbt_project.yml ]; then
+            dbt deps || true
+            dbt parse
+          else
+            echo "No dbt_project.yml found, skipping dbt parse"
+          fi
+
+      - name: dbt test
+        run: |
+          if [ -f dbt_project.yml ]; then
+            dbt test
+          else
+            echo "No dbt_project.yml found, skipping dbt test"
+          fi
+
+  schema-contract-check:
+    name: schema-contract-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run schema contract checks
+        run: |
+          if [ -f scripts/check_schema_contracts.py ]; then
+            python scripts/check_schema_contracts.py
+          else
+            echo "No schema contract script found. Add one or replace this step."
+            exit 1
+          fi
+
+  data-quality-check:
+    name: data-quality-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run data quality checks
+        run: |
+          if [ -f scripts/run_data_quality_checks.py ]; then
+            python scripts/run_data_quality_checks.py
+          else
+            echo "No data quality script found. Add one or replace this step."
+            exit 1
+          fi
+
+  catalog-check:
+    name: catalog-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Validate catalog metadata
+        run: |
+          if [ -f scripts/validate_catalog.py ]; then
+            python scripts/validate_catalog.py
+          else
+            echo "No catalog validation script found. Add one or replace this step."
+            exit 1
+          fi
+
+  security-and-secrets-scan:
+    name: security-and-secrets-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit bandit
+
+      - name: pip-audit
+        run: pip-audit || true
+
+      - name: bandit
+        run: bandit -r . -x tests || true
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -6,9 +6,48 @@ on:
     branches: [main, master]
 
 jobs:
+
+  # ── Detect which candidate folder changed in this PR ─────────────────────────
+  detect-candidate:
+    name: detect-candidate
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_dir: ${{ steps.detect.outputs.candidate_dir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect candidate folder
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE=${{ github.event.pull_request.base.sha }}
+          else
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+          fi
+
+          CANDIDATE_DIR=$(git diff --name-only "$BASE"...HEAD \
+            | grep '^submission/' \
+            | awk -F'/' '{print $1"/"$2}' \
+            | sort -u \
+            | head -1)
+
+          if [ -z "$CANDIDATE_DIR" ]; then
+            echo "No candidate folder detected in changed files."
+            exit 1
+          fi
+
+          echo "Detected candidate folder: $CANDIDATE_DIR"
+          echo "candidate_dir=$CANDIDATE_DIR" >> "$GITHUB_OUTPUT"
+
+  # ── 1. Lint ───────────────────────────────────────────────────────────────────
   lint-python-or-sql:
     name: lint-python-or-sql
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,18 +61,22 @@ jobs:
           pip install ruff black sqlfluff
 
       - name: Ruff
-        run: ruff check submission/
+        run: ruff check $CANDIDATE_DIR/
 
       - name: Black
-        run: black --check submission/
+        run: black --check $CANDIDATE_DIR/
 
       - name: SQLFluff
-        run: sqlfluff lint submission/ || true
+        run: sqlfluff lint $CANDIDATE_DIR/
         continue-on-error: true
 
+  # ── 2. Tests ──────────────────────────────────────────────────────────────────
   test-pipeline:
     name: test-pipeline
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,14 +88,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest
-          if [ -f submission/requirements.txt ]; then pip install -r submission/requirements.txt; fi
+          if [ -f "$CANDIDATE_DIR/requirements.txt" ]; then
+            pip install -r "$CANDIDATE_DIR/requirements.txt"
+          fi
 
       - name: Run tests
-        run: pytest submission/ -q
+        run: pytest $CANDIDATE_DIR/ -q
 
+  # ── 3. Model validation ───────────────────────────────────────────────────────
   validate-models:
     name: validate-models
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,24 +116,27 @@ jobs:
 
       - name: dbt parse
         run: |
-          if [ -f dbt_project.yml ]; then
-            dbt deps || true
-            dbt parse
+          if [ -f "$CANDIDATE_DIR/dbt_project.yml" ]; then
+            cd $CANDIDATE_DIR && dbt deps || true && dbt parse
           else
-            echo "No dbt_project.yml found, skipping dbt parse"
+            echo "No dbt_project.yml found in $CANDIDATE_DIR, skipping dbt parse"
           fi
 
       - name: dbt test
         run: |
-          if [ -f dbt_project.yml ]; then
-            dbt test
+          if [ -f "$CANDIDATE_DIR/dbt_project.yml" ]; then
+            cd $CANDIDATE_DIR && dbt test
           else
-            echo "No dbt_project.yml found, skipping dbt test"
+            echo "No dbt_project.yml found in $CANDIDATE_DIR, skipping dbt test"
           fi
 
+  # ── 4. Schema contract check ──────────────────────────────────────────────────
   schema-contract-check:
     name: schema-contract-check
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -95,20 +147,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f submission/requirements.txt ]; then pip install -r submission/requirements.txt; fi
+          if [ -f "$CANDIDATE_DIR/requirements.txt" ]; then
+            pip install -r "$CANDIDATE_DIR/requirements.txt"
+          fi
 
       - name: Run schema contract checks
         run: |
-          if [ -f submission/scripts/check_schema_contracts.py ]; then
-            python submission/scripts/check_schema_contracts.py
+          if [ -f "$CANDIDATE_DIR/scripts/check_schema_contracts.py" ]; then
+            python "$CANDIDATE_DIR/scripts/check_schema_contracts.py"
           else
-            echo "No schema contract script found. Add one or replace this step."
+            echo "No schema contract script found in $CANDIDATE_DIR/scripts/. Add one or replace this step."
             exit 1
           fi
 
+  # ── 5. Data quality check ─────────────────────────────────────────────────────
   data-quality-check:
     name: data-quality-check
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -119,20 +177,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f submission/requirements.txt ]; then pip install -r submission/requirements.txt; fi
+          if [ -f "$CANDIDATE_DIR/requirements.txt" ]; then
+            pip install -r "$CANDIDATE_DIR/requirements.txt"
+          fi
 
       - name: Run data quality checks
         run: |
-          if [ -f submission/scripts/run_data_quality_checks.py ]; then
-            python submission/scripts/run_data_quality_checks.py
+          if [ -f "$CANDIDATE_DIR/scripts/run_data_quality_checks.py" ]; then
+            python "$CANDIDATE_DIR/scripts/run_data_quality_checks.py"
           else
-            echo "No data quality script found. Add one or replace this step."
+            echo "No data quality script found in $CANDIDATE_DIR/scripts/. Add one or replace this step."
             exit 1
           fi
 
+  # ── 6. Catalog check ──────────────────────────────────────────────────────────
   catalog-check:
     name: catalog-check
+    needs: detect-candidate
     runs-on: ubuntu-latest
+    env:
+      CANDIDATE_DIR: ${{ needs.detect-candidate.outputs.candidate_dir }}
     steps:
       - uses: actions/checkout@v4
 
@@ -143,17 +207,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f submission/requirements.txt ]; then pip install -r submission/requirements.txt; fi
+          if [ -f "$CANDIDATE_DIR/requirements.txt" ]; then
+            pip install -r "$CANDIDATE_DIR/requirements.txt"
+          fi
 
       - name: Validate catalog metadata
         run: |
-          if [ -f submission/scripts/validate_catalog.py ]; then
-            python submission/scripts/validate_catalog.py
+          if [ -f "$CANDIDATE_DIR/scripts/validate_catalog.py" ]; then
+            python "$CANDIDATE_DIR/scripts/validate_catalog.py"
           else
-            echo "No catalog validation script found. Add one or replace this step."
+            echo "No catalog validation script found in $CANDIDATE_DIR/scripts/. Add one or replace this step."
             exit 1
           fi
 
+  # ── 7. Security and secrets scan ──────────────────────────────────────────────
   security-and-secrets-scan:
     name: security-and-secrets-scan
     runs-on: ubuntu-latest
